@@ -1020,3 +1020,184 @@ exports.getFacultyDashboardSummary = async (req, res) => {
   }
 };
 
+// Get day-wise attendance for advisor's class
+exports.getDayWiseAttendance = async (req, res) => {
+  try {
+    const isClassAdvisor = req.user.classAdvisorDetails && req.user.classAdvisorDetails.isClassAdvisor;
+    if (!isClassAdvisor && req.user.role !== 'Admin' && req.user.role !== 'HoD') {
+      return res.status(403).json({ message: 'Access denied: Restricted to Class Advisors.' });
+    }
+
+    let adv = req.user.classAdvisorDetails;
+    if (req.user.role === 'HoD' || req.user.role === 'Admin') {
+      adv = {
+        department: req.query.department || req.user.department,
+        year: req.query.year || '1',
+        semester: req.query.semester || '1',
+        section: req.query.section || 'A'
+      };
+    }
+
+    if (!adv || !adv.department) {
+      return res.status(400).json({ message: 'Class Advisor details are missing.' });
+    }
+
+    const { date } = req.query;
+    const targetDate = date ? new Date(date) : new Date();
+    targetDate.setHours(0, 0, 0, 0);
+
+    // Fetch students
+    const students = await User.find({
+      role: 'Student',
+      department: adv.department,
+      year: adv.year,
+      semester: adv.semester,
+      section: adv.section
+    }).select('_id name registerNumber rollNumber').sort({ name: 1 }).lean();
+
+    const studentIds = students.map(s => s._id);
+
+    // Fetch daily attendance records
+    const attendanceRecords = await Attendance.find({
+      student: { $in: studentIds },
+      date: targetDate
+    }).lean();
+
+    const recordsMap = {};
+    attendanceRecords.forEach(r => {
+      recordsMap[r.student.toString()] = r;
+    });
+
+    const studentList = students.map(s => ({
+      _id: s._id,
+      name: s.name,
+      registerNumber: s.registerNumber,
+      rollNumber: s.rollNumber,
+      status: recordsMap[s._id.toString()]?.status || 'Present', // default to Present
+      remarks: recordsMap[s._id.toString()]?.remarks || ''
+    }));
+
+    res.json({ success: true, date: targetDate, students: studentList });
+  } catch (error) {
+    console.error('getDayWiseAttendance error:', error);
+    res.status(500).json({ message: 'Server Error' });
+  }
+};
+
+// Mark day-wise attendance for advisor's class
+exports.markDayWiseAttendance = async (req, res) => {
+  try {
+    const isClassAdvisor = req.user.classAdvisorDetails && req.user.classAdvisorDetails.isClassAdvisor;
+    if (!isClassAdvisor && req.user.role !== 'Admin' && req.user.role !== 'HoD') {
+      return res.status(403).json({ message: 'Access denied: Restricted to Class Advisors.' });
+    }
+
+    let adv = req.user.classAdvisorDetails;
+    if (req.user.role === 'HoD' || req.user.role === 'Admin') {
+      adv = {
+        department: req.body.department || req.user.department,
+        year: req.body.year || '1',
+        semester: req.body.semester || '1',
+        section: req.body.section || 'A'
+      };
+    }
+
+    if (!adv || !adv.department) {
+      return res.status(400).json({ message: 'Class Advisor details are missing.' });
+    }
+
+    const { date, records } = req.body;
+    if (!records || !Array.isArray(records)) {
+      return res.status(400).json({ message: 'Records array is required.' });
+    }
+
+    const targetDate = date ? new Date(date) : new Date();
+    targetDate.setHours(0, 0, 0, 0);
+
+    // Get or create "Daily Attendance" subject for this class
+    const code = `DAILY-${adv.department}-${adv.year}-${adv.semester}`.toUpperCase();
+    let subject = await Subject.findOne({ code });
+    if (!subject) {
+      subject = new Subject({
+        name: 'Daily Attendance',
+        code,
+        credits: 0,
+        department: adv.department,
+        year: adv.year,
+        semester: adv.semester,
+        subjectType: 'Theory',
+        regulation: '2021'
+      });
+      await subject.save();
+    }
+
+    // Get or create daily Session for this class
+    let session = await Session.findOne({
+      subject: subject._id,
+      faculty: req.user.id,
+      department: adv.department,
+      year: adv.year,
+      semester: adv.semester,
+      section: adv.section,
+      date: targetDate
+    });
+
+    if (!session) {
+      session = new Session({
+        subject: subject._id,
+        faculty: req.user.id,
+        department: adv.department,
+        year: adv.year,
+        semester: adv.semester,
+        section: adv.section,
+        date: targetDate,
+        period: 'Day',
+        isActive: false,
+        locked: true
+      });
+      await session.save();
+    }
+
+    // Save/update attendance records
+    for (const rec of records) {
+      const student = await User.findById(rec.studentId).select('name department semester section');
+      if (!student) continue;
+
+      await Attendance.findOneAndUpdate(
+        { student: rec.studentId, date: targetDate },
+        {
+          session: session._id,
+          subject: subject._id,
+          faculty: req.user.id,
+          department: student.department,
+          year: student.year,
+          semester: student.semester,
+          section: student.section,
+          date: targetDate,
+          status: rec.status,
+          remarks: rec.remarks || '',
+          markedBy: 'Faculty',
+          entryType: 'Manual',
+          updatedBy: req.user.id,
+          period: 'Day',
+          locked: true
+        },
+        { upsert: true, new: true }
+      );
+    }
+
+    // Audit log
+    const { createLog } = require('../utils/logger');
+    await createLog('Daily Attendance Submission', req.user, 'Attendance', null, {
+      date: targetDate,
+      class: `${adv.department} Y${adv.year} Sec ${adv.section}`,
+      details: `Submitted daily attendance for ${records.length} students`
+    });
+
+    res.json({ success: true, message: 'Daily attendance saved successfully.' });
+  } catch (error) {
+    console.error('markDayWiseAttendance error:', error);
+    res.status(500).json({ message: 'Server Error' });
+  }
+};
+

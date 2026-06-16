@@ -972,9 +972,9 @@ exports.getAnalyticsOverview = async (req, res) => {
       
       const subjects = await Subject.find(subjectQuery).select('_id');
       const subjectIds = subjects.map(s => s._id);
-      attendanceMatch.subject = { $in: subjectIds };
+      attendanceMatch.department = req.user.department;
       marksQuery.subject = { $in: subjectIds };
-      sessionMatch.subject = { $in: subjectIds };
+      sessionMatch.department = req.user.department;
     }
 
     const [studentCount, facultyCount, subjectCount, attendanceCount] = await Promise.all([
@@ -2694,6 +2694,10 @@ exports.getStudentAttendanceDetails = async (req, res) => {
         
         if (p && dailyTimelineMap[dateStr].hasOwnProperty(p)) {
           dailyTimelineMap[dateStr][p] = statusChar;
+        } else if (!p || p === 'Day') {
+          for (let i = 1; i <= 7; i++) {
+            dailyTimelineMap[dateStr][`H${i}`] = statusChar;
+          }
         }
       }
     });
@@ -2834,6 +2838,9 @@ exports.getAdvisorStats = async (req, res) => {
       if (studentStatsMap[sId]) {
         studentStatsMap[sId].counts[rec.status] = (studentStatsMap[sId].counts[rec.status] || 0) + 1;
         studentStatsMap[sId].total++;
+        if (['Present', 'Late', 'On-Duty', 'On Duty'].includes(rec.status)) {
+          presentCount++;
+        }
       }
     });
 
@@ -2841,16 +2848,13 @@ exports.getAdvisorStats = async (req, res) => {
       ? Math.round((presentCount / attendanceRecords.length) * 100)
       : 0;
 
-    // 3. Defaulters (< 75%) and At-Risk (75% to 80%)
-    const defaulters = [];
-    const atRisk = [];
-
-    students.forEach(s => {
+    // 3. Compile stats for all students
+    const allStudentsStats = students.map(s => {
       const sId = s._id.toString();
       const stats = studentStatsMap[sId];
       const pct = calculatePercentage(stats.counts, policies);
 
-      const studentData = {
+      return {
         _id: s._id,
         name: s.name,
         registerNumber: s.registerNumber,
@@ -2861,17 +2865,19 @@ exports.getAdvisorStats = async (req, res) => {
         parentMobile: s.parentDetails?.mobile,
         attendancePercentage: pct,
         totalClasses: stats.total,
-        classesAttended: (stats.counts['Present'] || 0) + (stats.counts['On-Duty'] || 0) + (stats.counts['On Duty'] || 0)
+        classesAttended: (stats.counts['Present'] || 0) + (stats.counts['On-Duty'] || 0) + (stats.counts['On Duty'] || 0) + (stats.counts['Late'] || 0),
+        presentCount: stats.counts['Present'] || 0,
+        absentCount: stats.counts['Absent'] || 0,
+        odCount: (stats.counts['On-Duty'] || 0) + (stats.counts['On Duty'] || 0),
+        lateCount: stats.counts['Late'] || 0
       };
-
-      if (pct < (policies.attendanceThreshold || 75)) {
-        defaulters.push(studentData);
-      } else if (pct < (policies.attendanceThreshold || 75) + 5) {
-        atRisk.push(studentData);
-      }
     });
 
-    // 4. Top Performing Students (By average Marks)
+    // 4. Defaulters (< 75%) and At-Risk (75% to 80%)
+    const defaulters = allStudentsStats.filter(s => s.attendancePercentage < (policies.attendanceThreshold || 75));
+    const atRisk = allStudentsStats.filter(s => s.attendancePercentage >= (policies.attendanceThreshold || 75) && s.attendancePercentage < (policies.attendanceThreshold || 75) + 5);
+
+    // 5. Top Performing Students (By average Marks)
     const marks = await Mark.find({ student: { $in: studentIds } }).lean();
     const studentMarksMap = {};
     studentIds.forEach(id => {
@@ -2899,14 +2905,14 @@ exports.getAdvisorStats = async (req, res) => {
     .sort((a, b) => b.averageMark - a.averageMark)
     .slice(0, 5);
 
-    // 5. Pending Leave Requests
+    // 6. Pending Leave Requests
     const pendingLeaves = await Request.find({
       requestedBy: { $in: studentIds },
       targetModel: 'Leave',
       status: 'Pending'
     }).populate('requestedBy', 'name registerNumber').lean();
 
-    // 6. Trend Map (date-wise percentage)
+    // 7. Trend Map (date-wise percentage)
     const trendMap = {};
     attendanceRecords.forEach(rec => {
       if (rec.date) {
@@ -2937,6 +2943,7 @@ exports.getAdvisorStats = async (req, res) => {
         atRiskCount: atRisk.length,
         pendingLeavesCount: pendingLeaves.length
       },
+      students: allStudentsStats,
       defaulters,
       atRisk,
       topPerforming,

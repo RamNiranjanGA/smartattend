@@ -1,9 +1,9 @@
 const mongoose = require('mongoose');
 
 const attendanceSchema = new mongoose.Schema({
-  session: { type: mongoose.Schema.Types.ObjectId, ref: 'Session', required: true },
+  session: { type: mongoose.Schema.Types.ObjectId, ref: 'Session' },
   student: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  subject: { type: mongoose.Schema.Types.ObjectId, ref: 'Subject', required: true },
+  subject: { type: mongoose.Schema.Types.ObjectId, ref: 'Subject' },
   faculty: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, // Store Faculty ID
   department: { type: String }, // Store Class/Section Details
   year: { type: String },

@@ -5,7 +5,7 @@ import { useAuth } from '../../context/AuthContext';
 import { 
   Users, CheckCircle2, XCircle, AlertCircle, FileSpreadsheet, Shield, Search,
   TrendingUp, Award, UserCog, Mail, Phone, Calendar, MessagesSquare, History, Plus,
-  FileCheck2, Check, X, ShieldAlert, ArrowLeft, Eye, Clock, Trash, AlertTriangle, Send
+  FileCheck2, Check, X, ShieldAlert, ArrowLeft, Eye, Clock, Trash, AlertTriangle, Send, CheckSquare
 } from 'lucide-react';
 import { 
   ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend 
@@ -25,6 +25,13 @@ export default function AdvisorDashboardView({ faculty }) {
   // Local Directory Filters
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedStudentId, setSelectedStudentId] = useState(null);
+
+  // Daily Attendance States
+  const [attendanceDate, setAttendanceDate] = useState(new Date().toISOString().split('T')[0]);
+  const [dailyRoster, setDailyRoster] = useState([]);
+  const [loadingRoster, setLoadingRoster] = useState(false);
+  const [savingRoster, setSavingRoster] = useState(false);
+  const [selectedStudentDetails, setSelectedStudentDetails] = useState(null);
   
   // Student Modal Editing
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -85,8 +92,10 @@ export default function AdvisorDashboardView({ faculty }) {
       fetchRequests();
     } else if (activeSubTab === 'audit') {
       fetchAuditLogs();
+    } else if (activeSubTab === 'mark-attendance') {
+      fetchDailyRoster(attendanceDate);
     }
-  }, [activeSubTab]);
+  }, [activeSubTab, attendanceDate]);
 
   const fetchStats = async () => {
     try {
@@ -170,40 +179,106 @@ export default function AdvisorDashboardView({ faculty }) {
     }
   };
 
-  // CSV Export
+  // Day-wise Attendance Methods
+  const fetchDailyRoster = async (date) => {
+    try {
+      setLoadingRoster(true);
+      let queryStr = `?date=${date}`;
+      if (faculty?.classAdvisorDetails) {
+        const adv = faculty.classAdvisorDetails;
+        queryStr += `&department=${adv.department}&year=${adv.year}&semester=${adv.semester}&section=${adv.section}`;
+      }
+      const res = await axios.get(apiUrl(`/api/attendance/day-wise${queryStr}`), {
+        headers: withAuthHeader()
+      });
+      setDailyRoster(res.data.students || []);
+    } catch (err) {
+      console.error('Error fetching daily roster:', err);
+    } finally {
+      setLoadingRoster(false);
+    }
+  };
+
+  const handleSaveDailyAttendance = async () => {
+    try {
+      setSavingRoster(true);
+      const payload = {
+        date: attendanceDate,
+        records: dailyRoster.map(s => ({ studentId: s._id, status: s.status, remarks: s.remarks }))
+      };
+      if (faculty?.classAdvisorDetails) {
+        const adv = faculty.classAdvisorDetails;
+        payload.department = adv.department;
+        payload.year = adv.year;
+        payload.semester = adv.semester;
+        payload.section = adv.section;
+      }
+      await axios.post(apiUrl('/api/attendance/day-wise'), payload, {
+        headers: withAuthHeader()
+      });
+      alert('Daily attendance saved successfully.');
+      fetchStats();
+    } catch (err) {
+      console.error('Error saving daily attendance:', err);
+      alert(err.response?.data?.message || 'Failed to save daily attendance.');
+    } finally {
+      setSavingRoster(false);
+    }
+  };
+
+  const handleExportStudentCsv = (student) => {
+    const csvEscape = (val) => `"${String(val).replace(/"/g, '""')}"`;
+    const headers = ['Field', 'Details'];
+    const rows = [
+      ['Student Name', student.name],
+      ['Register Number', student.registerNumber || '-'],
+      ['Roll Number', student.rollNumber || '-'],
+      ['Student Phone', student.mobile || '-'],
+      ['Parent Name', student.parentName || '-'],
+      ['Parent Phone', student.parentMobile || '-'],
+      ['Total Classes', student.totalClasses || 0],
+      ['Classes Attended', student.classesAttended || 0],
+      ['Present Count', student.presentCount || 0],
+      ['Absent Count', student.absentCount || 0],
+      ['OD Count', student.odCount || 0],
+      ['Attendance Percentage', `${student.attendancePercentage}%`]
+    ];
+    const csvRows = [headers, ...rows];
+    const csvContent = "data:text/csv;charset=utf-8," + csvRows.map(e => e.map(csvEscape).join(",")).join("\n");
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement("a");
+    link.setAttribute("href", encodedUri);
+    link.setAttribute("download", `${student.name.replace(/\s+/g, '_')}_details.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  // CSV Export for class roster
   const handleExportRoster = () => {
-    if (!statsData?.defaulters) return;
+    if (!statsData?.students) return;
     const csvRows = [
-      ['Register No.', 'Student Name', 'Attendance %', 'Total Periods', 'Attended Periods', 'Status']
+      ['Register No.', 'Student Name', 'Attendance %', 'Total Classes', 'Attended Days', 'Present Days', 'Absent Days', 'OD Days', 'Student Phone', 'Parent Name', 'Parent Phone']
     ];
 
-    const allStudents = [...(statsData.defaulters || []), ...(statsData.atRisk || [])];
-    
-    // We can also fetch the whole list of students by calling directory or mapping from statsData
-    // Let's export all students mapped in statsData
-    const mappedExporters = [];
-    const idsAdded = new Set();
+    statsData.students.forEach(s => {
+      csvRows.push([
+        s.registerNumber || '',
+        s.name || '',
+        `${s.attendancePercentage}%`,
+        s.totalClasses || 0,
+        s.classesAttended || 0,
+        s.presentCount || 0,
+        s.absentCount || 0,
+        s.odCount || 0,
+        s.mobile || '',
+        s.parentName || '',
+        s.parentMobile || ''
+      ]);
+    });
 
-    const addStudentToExport = (s, status) => {
-      if (!idsAdded.has(s._id)) {
-        idsAdded.add(s._id);
-        mappedExporters.push([
-          s.registerNumber || '',
-          s.name || '',
-          `${s.attendancePercentage}%`,
-          s.totalClasses || 0,
-          s.classesAttended || 0,
-          status
-        ]);
-      }
-    };
-
-    statsData.defaulters.forEach(s => addStudentToExport(s, 'Defaulter (<75%)'));
-    statsData.atRisk.forEach(s => addStudentToExport(s, 'At Risk (75-80%)'));
-
-    csvRows.push(...mappedExporters);
-
-    const csvContent = "data:text/csv;charset=utf-8," + csvRows.map(e => e.join(",")).join("\n");
+    const csvEscape = (val) => `"${String(val).replace(/"/g, '""')}"`;
+    const csvContent = "data:text/csv;charset=utf-8," + csvRows.map(e => e.map(csvEscape).join(",")).join("\n");
     const encodedUri = encodeURI(csvContent);
     const link = document.createElement("a");
     link.setAttribute("href", encodedUri);
@@ -331,16 +406,12 @@ export default function AdvisorDashboardView({ faculty }) {
     : requests;
 
   // Compile full roster list
-  const fullRoster = [];
-  const addedIds = new Set();
-  const addStudentToRoster = (s, category) => {
-    if (!addedIds.has(s._id.toString())) {
-      addedIds.add(s._id.toString());
-      fullRoster.push({ ...s, category });
-    }
-  };
-  defaulters.forEach(s => addStudentToRoster(s, 'Defaulter'));
-  atRisk.forEach(s => addStudentToRoster(s, 'At-Risk'));
+  const fullRoster = (statsData.students || []).map(s => {
+    let category = 'Normal';
+    if (s.attendancePercentage < 75) category = 'Defaulter';
+    else if (s.attendancePercentage < 80) category = 'At-Risk';
+    return { ...s, category };
+  });
 
   // Local filtering
   const filteredRoster = fullRoster.filter(s => {
@@ -406,7 +477,8 @@ export default function AdvisorDashboardView({ faculty }) {
       <div className="border-b border-slate-200 bg-white px-6 py-1.5 rounded-2xl shadow-sm flex flex-wrap gap-2">
         {[
           { id: 'overview', label: 'Stats & Trends', icon: TrendingUp },
-          { id: 'students', label: 'Students Directory', icon: Users },
+          { id: 'mark-attendance', label: 'Mark Daily Attendance', icon: CheckSquare },
+          { id: 'students', label: 'My Class', icon: Users },
           { id: 'leaves', label: `Pending Approvals (${statistics.pendingLeavesCount})`, icon: FileCheck2 },
           { id: 'communications', label: 'Message & Alerts', icon: MessagesSquare },
           { id: 'counseling', label: 'Counseling & Mentorship', icon: ShieldAlert },
@@ -561,7 +633,101 @@ export default function AdvisorDashboardView({ faculty }) {
         </div>
       )}
 
-      {/* 2. STUDENTS DIRECTORY */}
+      {/* 2. MARK DAILY ATTENDANCE */}
+      {activeSubTab === 'mark-attendance' && (
+        <div className="space-y-6">
+          <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm flex flex-col sm:flex-row justify-between items-stretch sm:items-center gap-4">
+            <div>
+              <h3 className="text-base font-extrabold text-slate-800">Mark Daily Attendance</h3>
+              <p className="text-xs text-slate-400 font-semibold mt-0.5">Select a date to record student attendance for your advised class.</p>
+            </div>
+            <div className="flex items-center gap-3">
+              <label className="text-xs font-bold text-slate-500 uppercase">Attendance Date:</label>
+              <input 
+                type="date" 
+                value={attendanceDate} 
+                max={new Date().toISOString().split('T')[0]}
+                onChange={e => {
+                  setAttendanceDate(e.target.value);
+                  fetchDailyRoster(e.target.value);
+                }}
+                className="bg-slate-50 border border-slate-200 rounded-xl p-2 text-xs font-bold outline-none focus:border-indigo-500 text-slate-800"
+              />
+            </div>
+            <button 
+              onClick={handleSaveDailyAttendance}
+              disabled={savingRoster || dailyRoster.length === 0}
+              className="px-6 py-2.5 bg-indigo-650 hover:bg-indigo-700 text-white font-extrabold rounded-xl transition text-xs flex items-center gap-1.5 shadow-lg shadow-indigo-700/20 disabled:opacity-50"
+            >
+              {savingRoster ? 'Saving...' : 'Save Attendance'}
+            </button>
+          </div>
+
+          <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
+            {loadingRoster ? (
+              <div className="flex flex-col items-center justify-center p-20">
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600 mb-2"></div>
+                <p className="text-slate-500 font-bold text-xs">Loading class roster...</p>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-center text-sm whitespace-nowrap">
+                  <thead className="bg-slate-50 border-b border-slate-100">
+                    <tr>
+                      <th className="p-4 font-bold text-slate-700 text-left border-r border-slate-100">Register No.</th>
+                      <th className="p-4 font-bold text-slate-700 text-left border-r border-slate-100">Student Name</th>
+                      <th className="p-4 font-bold text-slate-700">Attendance Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {dailyRoster.map(s => (
+                      <tr key={s._id} className="hover:bg-slate-50/70 transition">
+                        <td className="p-4 font-bold text-slate-600 text-left border-r border-slate-100 font-mono text-xs">{s.registerNumber || '-'}</td>
+                        <td className="p-4 font-bold text-slate-800 text-left border-r border-slate-100 text-xs">{s.name}</td>
+                        <td className="p-4">
+                          <div className="flex justify-center gap-1.5">
+                            {['Present', 'Absent', 'On-Duty'].map(lbl => {
+                              const isActive = s.status === lbl;
+                              let activeClass = '';
+                              let inactiveClass = 'bg-slate-50 hover:bg-slate-100 text-slate-400 border-slate-200';
+                              
+                              if (lbl === 'Present') activeClass = 'bg-emerald-500 text-white border-emerald-500 shadow-sm shadow-emerald-100';
+                              else if (lbl === 'Absent') activeClass = 'bg-rose-500 text-white border-rose-500 shadow-sm shadow-rose-100';
+                              else activeClass = 'bg-indigo-600 text-white border-indigo-650 shadow-sm shadow-indigo-105';
+
+                              return (
+                                <button
+                                  key={lbl}
+                                  type="button"
+                                  onClick={() => {
+                                    setDailyRoster(prev => prev.map(item => item._id === s._id ? { ...item, status: lbl } : item));
+                                  }}
+                                  className={`px-4 py-2 rounded-xl text-[10px] font-black uppercase border transition duration-150 ${
+                                    isActive ? activeClass : inactiveClass
+                                  }`}
+                                >
+                                  {lbl === 'On-Duty' ? 'OD' : lbl}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                    {dailyRoster.length === 0 && (
+                      <tr>
+                        <td colSpan="3" className="p-10 text-center text-slate-400 italic font-semibold">No students assigned to your class roster.</td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* 3. MY CLASS DIRECTORY */}
       {activeSubTab === 'students' && (
         <div className="space-y-6">
           {/* Search Directory Filter */}
@@ -593,7 +759,7 @@ export default function AdvisorDashboardView({ faculty }) {
                     <th className="p-4 font-bold text-slate-700 text-left border-r border-slate-100">Student Name</th>
                     <th className="p-4 font-bold text-slate-700 border-r border-slate-100">Attendance %</th>
                     <th className="p-4 font-bold text-slate-700 border-r border-slate-100">Roster Category</th>
-                    <th className="p-4 font-bold text-slate-700 border-r border-slate-100">Attended Periods</th>
+                    <th className="p-4 font-bold text-slate-700 border-r border-slate-100">Attended Days</th>
                     <th className="p-4 font-bold text-slate-700 border-r border-slate-100">Parent Details</th>
                     <th className="p-4 font-bold text-slate-700">Actions</th>
                   </tr>
@@ -606,7 +772,7 @@ export default function AdvisorDashboardView({ faculty }) {
                         <td className="p-4 font-bold text-slate-700 text-left border-r border-slate-100 font-mono">{s.registerNumber || '-'}</td>
                         <td className="p-4 font-bold text-slate-800 text-left border-r border-slate-100">
                           <span 
-                            onClick={() => setSelectedStudentId(s._id)}
+                            onClick={() => setSelectedStudentDetails(s)}
                             className="text-indigo-600 hover:text-indigo-800 hover:underline cursor-pointer transition font-bold"
                           >
                             {s.name}
@@ -1357,6 +1523,96 @@ export default function AdvisorDashboardView({ faculty }) {
         onSuccess={() => { setIsModalOpen(false); setEditStudent(null); fetchStats(); }}
         departmentOnly={true}
       />
+
+      {/* Student Details View Modal */}
+      {selectedStudentDetails && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 backdrop-blur-sm p-4 font-sans overflow-y-auto">
+          <div className="bg-white rounded-2xl w-full max-w-lg shadow-2xl overflow-hidden my-auto border border-slate-100">
+            <div className="bg-gradient-to-r from-slate-900 to-indigo-950 p-6 text-white flex justify-between items-center">
+              <div>
+                <h3 className="text-lg font-extrabold">Student Attendance Profile</h3>
+                <p className="text-xs text-slate-300 font-semibold mt-0.5">Advisee contact details and statistics.</p>
+              </div>
+              <button 
+                onClick={() => setSelectedStudentDetails(null)}
+                className="p-1.5 bg-white/10 hover:bg-white/20 rounded-lg text-white/85 transition"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-6">
+              {/* Profile Card */}
+              <div className="bg-slate-50 border rounded-2xl p-5 space-y-3.5">
+                <div className="flex justify-between items-start border-b border-slate-200 pb-3">
+                  <div>
+                    <h4 className="text-base font-black text-slate-800">{selectedStudentDetails.name}</h4>
+                    <p className="text-xs text-slate-450 font-semibold mt-0.5">Reg No: {selectedStudentDetails.registerNumber || '-'}</p>
+                    <p className="text-[10px] text-slate-400 font-mono mt-0.5">Roll No: {selectedStudentDetails.rollNumber || '-'}</p>
+                  </div>
+                  <div className="text-right">
+                    <span className={`text-2xl font-black ${selectedStudentDetails.attendancePercentage >= 75 ? 'text-indigo-650' : 'text-rose-600'}`}>
+                      {selectedStudentDetails.attendancePercentage}%
+                    </span>
+                    <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider mt-0.5">Attendance</p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4 text-xs font-semibold text-slate-650">
+                  <div className="space-y-1">
+                    <p className="text-[10px] text-slate-400 uppercase font-black">Student Contact</p>
+                    <p className="text-slate-800 font-bold flex items-center gap-1.5"><Phone className="w-3.5 h-3.5 text-indigo-500" /> {selectedStudentDetails.mobile || 'N/A'}</p>
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-[10px] text-slate-400 uppercase font-black">Parents Contact</p>
+                    <p className="text-slate-800 font-bold flex items-center gap-1.5"><Phone className="w-3.5 h-3.5 text-indigo-500" /> {selectedStudentDetails.parentMobile || 'N/A'}</p>
+                    <p className="text-[10px] text-slate-450 italic mt-0.5">Name: {selectedStudentDetails.parentName || 'N/A'}</p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Statistics Details */}
+              <div>
+                <h4 className="text-xs font-black text-slate-400 uppercase tracking-wider mb-3">Attendance Breakdown</h4>
+                <div className="grid grid-cols-4 gap-3 text-center">
+                  <div className="bg-slate-50 border border-slate-100 p-3 rounded-xl">
+                    <span className="text-lg font-black text-slate-700 block">{selectedStudentDetails.totalClasses}</span>
+                    <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider block mt-0.5">Conducted</span>
+                  </div>
+                  <div className="bg-emerald-50 border border-emerald-100/50 p-3 rounded-xl">
+                    <span className="text-lg font-black text-emerald-655 block">{selectedStudentDetails.presentCount}</span>
+                    <span className="text-[9px] font-bold text-emerald-500 uppercase tracking-wider block mt-0.5">Present</span>
+                  </div>
+                  <div className="bg-rose-50 border border-rose-100/50 p-3 rounded-xl">
+                    <span className="text-lg font-black text-rose-655 block">{selectedStudentDetails.absentCount}</span>
+                    <span className="text-[9px] font-bold text-rose-500 uppercase tracking-wider block mt-0.5">Absent</span>
+                  </div>
+                  <div className="bg-indigo-50 border border-indigo-105 p-3 rounded-xl">
+                    <span className="text-lg font-black text-indigo-655 block">{selectedStudentDetails.odCount}</span>
+                    <span className="text-[9px] font-bold text-indigo-500 uppercase tracking-wider block mt-0.5">On Duty</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Export details specifically */}
+              <div className="pt-4 flex justify-between gap-3 border-t border-slate-100">
+                <button 
+                  onClick={() => handleExportStudentCsv(selectedStudentDetails)}
+                  className="px-5 py-2.5 bg-emerald-50 border border-emerald-100 text-emerald-700 hover:bg-emerald-100 font-extrabold rounded-xl text-xs flex items-center gap-1.5 transition shadow-sm"
+                >
+                  <FileSpreadsheet className="w-4 h-4" /> Export CSV
+                </button>
+                <button 
+                  onClick={() => setSelectedStudentDetails(null)}
+                  className="px-5 py-2.5 bg-indigo-650 hover:bg-indigo-700 text-white font-extrabold rounded-xl text-xs transition shadow-md shadow-indigo-100"
+                >
+                  Close Details
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

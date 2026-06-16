@@ -14,13 +14,17 @@ const {
   downloadFacultyReportCsv,
   startSession,
   getFacultyDashboardSummary,
-  startCustomSession
+  startCustomSession,
+  getDayWiseAttendance,
+  markDayWiseAttendance
 } = require('../controllers/attendanceController');
 const { protect } = require('../middleware/authMiddleware');
 
 // Apply protect middleware to all routes in this file
 router.use(protect);
 
+router.get('/day-wise', getDayWiseAttendance);
+router.post('/day-wise', markDayWiseAttendance);
 router.get('/dashboard-summary', getFacultyDashboardSummary);
 router.get('/active', getActiveSession);
 router.post('/location', updateFacultyLocation);
